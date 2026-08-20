@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>猫咪叠叠乐 Cat Tower</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; overflow:hidden; background:#ffe9d6;
+    font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+  #wrap { position:relative; width:100vw; height:100vh; display:flex;
+    align-items:center; justify-content:center; }
+  #game { background:linear-gradient(160deg,#fff3e6 0%,#ffe0ec 55%,#fff0e0 100%);
+    display:block; touch-action:none; box-shadow:0 24px 70px rgba(180,120,120,.18);
+    border-radius:26px; }
+  .hud { position:absolute; top:20px; left:0; right:0; display:flex;
+    justify-content:space-between; align-items:flex-start; padding:0 26px;
+    pointer-events:none; }
+  .score { font-size:40px; font-weight:800; color:#ff6b6b; line-height:1;
+    text-shadow:0 2px 0 rgba(255,255,255,.6); }
+  .score small { display:block; font-size:12px; font-weight:600; color:#c98ba0;
+    margin-bottom:2px; letter-spacing:1px; }
+  .best { font-size:14px; font-weight:600; color:#b5838d; text-align:right;
+    margin-top:6px; }
+  .overlay { position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; background:rgba(255,248,242,.74);
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); border-radius:26px;
+    text-align:center; padding:24px; }
+  .overlay h1 { font-size:32px; color:#ff6b6b; margin-bottom:10px; font-weight:800; }
+  .overlay p { color:#a9798a; font-size:15px; line-height:1.6; margin-bottom:22px;
+    max-width:260px; }
+  .btn { background:#ff6b6b; color:#fff; border:none; padding:15px 38px;
+    border-radius:32px; font-size:18px; font-weight:700; cursor:pointer;
+    box-shadow:0 10px 24px rgba(255,107,107,.42); transition:transform .1s; }
+  .btn:active { transform:scale(.95); }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div class="hud">
+    <div class="score"><small>已叠 CATS</small><span id="score">0</span></div>
+    <div class="best" id="best">最高 0</div>
+  </div>
+  <div class="overlay" id="start">
+    <h1>🐱 猫咪叠叠乐</h1>
+    <p>移动手指瞄准，松手把猫咪放下来。<br>叠得越高越好，掉下平台就结束！</p>
+    <button class="btn" id="startBtn">开始游戏</button>
+  </div>
+  <div class="overlay hidden" id="over">
+    <h1>塌啦～</h1>
+    <p id="overText">你叠了 0 只猫</p>
+    <button class="btn" id="retryBtn">再来一次</button>
+  </div>
+</div>
+<script>
+(() => {
+  const cvs = document.getElementById('game');
+  const ctx = cvs.getContext('2d');
+  const W = 390, H = 720;
+  const DPR = Math.min(window.devicePixelRatio || 1, 3);
+
+  function fit() {
+    const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+    cvs.style.width = (W * s) + 'px';
+    cvs.style.height = (H * s) + 'px';
+    cvs.width = W * DPR; cvs.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+
+  // ---- 平台 ----
+  const plat = { w: 150, h: 18, y: 600 };
+  plat.x = (W - plat.w) / 2;
+
+  const COLORS = ['#FFB3BA','#FFD3B6','#FFF3B0','#BAE1FF','#C9B6FF','#B5EAD7','#FFC8DD'];
+  const GRAV = 0.42;
+  const FRICTION = 0.992;
+  const ITER = 10;
+
+  let cats = [];
+  let cur = null;        // 当前待投放的猫
+  let score = 0;
+  let best = +(localStorage.getItem('cattower_best') || 0);
+  let state = 'start';   // start | play | over
+  let aimX = W / 2;
+  let overTimer = 0;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lighten(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    r = Math.min(255, r + 45); g = Math.min(255, g + 45); b = Math.min(255, b + 45);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function makeCat(x, y, drop) {
+    const r = rand(24, 33);
+    const color = COLORS[(Math.random() * COLORS.length) | 0];
+    return {
+      x, y, px: x, py: drop ? y : y, r, color,
+      blink: Math.random() * 200 | 0, blinkT: 0,
+      face: Math.random() < 0.5 ? 'happy' : 'cool'
+    };
+  }
+
+  function spawnCur() {
+    cur = makeCat(aimX, 78, false);
+  }
+
+  function dropCur() {
+    if (!cur) return;
+    cur.px = cur.x; cur.py = cur.y;   // 初速 0，靠重力下落
+    cats.push(cur);
+    score = cats.length;
+    cur = null;
+    setTimeout(spawnCur, 260);
+  }
+
+  // ---- 物理 ----
+  function step() {
+    for (const c of cats) {
+      let vx = (c.x - c.px) * FRICTION;
+      let vy = (c.y - c.py) * FRICTION;
+      c.px = c.x; c.py = c.y;
+      c.x += vx;
+      c.y += vy + GRAV;
+      if (++c.blinkT > c.blink) { c.blinkT = 0; c.blink = rand(120, 280) | 0; }
+    }
+    for (let k = 0; k < ITER; k++) {
+      // 猫-猫
+      for (let i = 0; i < cats.length; i++) {
+        for (let j = i + 1; j < cats.length; j++) {
+          const a = cats[i], b = cats[j];
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let d = Math.hypot(dx, dy) || 0.001;
+          const min = a.r + b.r;
+          if (d < min) {
+            const o = (min - d) / 2;
+            const nx = dx / d, ny = dy / d;
+            a.x -= nx * o; a.y -= ny * o;
+            b.x += nx * o; b.y += ny * o;
+          }
+        }
+      }
+      // 猫-平台（仅当中心在平台跨度内才支撑）
+      for (const c of cats) {
+        if (c.x > plat.x && c.x < plat.x + plat.w) {
+          if (c.y + c.r > plat.y && c.y < plat.y + plat.h) {
+            c.y = plat.y - c.r;
+            c.py = c.y + (c.py - c.y) * 0.2; // 轻微吸收竖直速度
+          }
+        }
+      }
+    }
+    // 掉出屏幕 → 结束
+    for (const c of cats) {
+      if (c.y - c.r > H + 20) { gameOver(); break; }
+    }
+  }
+
+  function gameOver() {
+    if (state !== 'play') return;
+    state = 'over';
+    if (score > best) { best = score; localStorage.setItem('cattower_best', best); }
+    document.getElementById('best').textContent = '最高 ' + best;
+    document.getElementById('overText').textContent = '你叠了 ' + score + ' 只猫';
+    document.getElementById('over').classList.remove('hidden');
+  }
+
+  // ---- 渲染 ----
+  function drawCat(c) {
+    const { x, y, r, color } = c;
+    // 耳朵
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x - r * 0.62, y - r * 0.45);
+    ctx.lineTo(x - r * 0.22, y - r * 1.02);
+    ctx.lineTo(x - r * 0.02, y - r * 0.55);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x + r * 0.62, y - r * 0.45);
+    ctx.lineTo(x + r * 0.22, y - r * 1.02);
+    ctx.lineTo(x + r * 0.02, y - r * 0.55);
+    ctx.closePath(); ctx.fill();
+    // 内耳
+    ctx.fillStyle = 'rgba(255,150,175,.55)';
+    ctx.beginPath();
+    ctx.moveTo(x - r * 0.42, y - r * 0.5);
+    ctx.lineTo(x - r * 0.22, y - r * 0.85);
+    ctx.lineTo(x - r * 0.12, y - r * 0.55);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x + r * 0.42, y - r * 0.5);
+    ctx.lineTo(x + r * 0.22, y - r * 0.85);
+    ctx.lineTo(x + r * 0.12, y - r * 0.55);
+    ctx.closePath(); ctx.fill();
+    // 身体（径向渐变做出球体感）
+    const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.2, x, y, r);
+    g.addColorStop(0, lighten(color));
+    g.addColorStop(1, color);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    // 脸
+    ctx.fillStyle = '#3a3340';
+    const eyeOpen = (c.blinkT < 8);
+    if (eyeOpen) {
+      ctx.beginPath(); ctx.arc(x - r * 0.32, y - r * 0.05, r * 0.12, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + r * 0.32, y - r * 0.05, r * 0.12, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(x - r * 0.28, y - r * 0.1, r * 0.045, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + r * 0.36, y - r * 0.1, r * 0.045, 0, 7); ctx.fill();
+    } else {
+      ctx.fillRect(x - r * 0.42, y - r * 0.05, r * 0.22, r * 0.05);
+      ctx.fillRect(x + r * 0.2, y - r * 0.05, r * 0.22, r * 0.05);
+    }
+    // 鼻子
+    ctx.fillStyle = '#ff8fab';
+    ctx.beginPath();
+    ctx.moveTo(x, y + r * 0.12);
+    ctx.lineTo(x - r * 0.08, y + r * 0.04);
+    ctx.lineTo(x + r * 0.08, y + r * 0.04);
+    ctx.closePath(); ctx.fill();
+    // 腮红
+    ctx.fillStyle = 'rgba(255,140,170,.4)';
+    ctx.beginPath(); ctx.arc(x - r * 0.5, y + r * 0.16, r * 0.13, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + r * 0.5, y + r * 0.16, r * 0.13, 0, 7); ctx.fill();
+    // 嘴
+    ctx.strokeStyle = '#3a3340'; ctx.lineWidth = r * 0.05; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(x - r * 0.1, y + r * 0.16, r * 0.12, 0.1, Math.PI - 0.1);
+    ctx.arc(x + r * 0.1, y + r * 0.16, r * 0.12, 0.1, Math.PI - 0.1);
+    ctx.stroke();
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+    // 平台投影
+    ctx.fillStyle = 'rgba(180,120,120,.12)';
+    ctx.beginPath(); ctx.ellipse(plat.x + plat.w / 2, plat.y + plat.h + 6, plat.w / 2 + 8, 10, 0, 0, 7); ctx.fill();
+    // 平台
+    ctx.fillStyle = '#caa6c4';
+    roundRect(plat.x, plat.y, plat.w, plat.h, 8); ctx.fill();
+    ctx.fillStyle = '#b692b0';
+    roundRect(plat.x, plat.y + plat.h - 6, plat.w, 6, 3); ctx.fill();
+    // 投放引导线
+    if (cur && state === 'play') {
+      ctx.strokeStyle = 'rgba(255,107,107,.35)';
+      ctx.setLineDash([4, 6]); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(cur.x, cur.y + cur.r);
+      ctx.lineTo(cur.x, plat.y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    for (const c of cats) drawCat(c);
+    if (cur) drawCat(cur);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // ---- 主循环（固定步长，支持高刷） ----
+  let last = performance.now(), acc = 0;
+  const FIXED = 1000 / 120;
+  function loop(t) {
+    const dt = Math.min(t - last, 100);
+    last = t;
+    if (state === 'play') {
+      acc += dt;
+      let n = 0;
+      while (acc >= FIXED && n < 8) { step(); acc -= FIXED; n++; }
+    }
+    render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // ---- 输入 ----
+  function pointerX(e) {
+    const rect = cvs.getBoundingClientRect();
+    const cx = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+    return cx * (W / rect.width);
+  }
+  function move(e) { if (state === 'play' && cur) { aimX = Math.max(cur.r, Math.min(W - cur.r, pointerX(e))); cur.x = aimX; } }
+  function release(e) {
+    if (state === 'play') { e.preventDefault(); dropCur(); }
+  }
+  cvs.addEventListener('mousemove', move);
+  cvs.addEventListener('touchmove', (e) => { e.preventDefault(); move(e); }, { passive: false });
+  cvs.addEventListener('mouseup', release);
+  cvs.addEventListener('touchend', release);
+
+  function start() {
+    cats = []; score = 0; cur = null; state = 'play';
+    document.getElementById('score').textContent = '0';
+    document.getElementById('best').textContent = '最高 ' + best;
+    document.getElementById('start').classList.add('hidden');
+    document.getElementById('over').classList.add('hidden');
+    spawnCur();
+  }
+  document.getElementById('startBtn').addEventListener('click', start);
+  document.getElementById('retryBtn').addEventListener('click', start);
+})();
+</script>
+</body>
+</html>
